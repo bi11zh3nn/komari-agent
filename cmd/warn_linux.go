@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 )
 
@@ -31,27 +30,14 @@ type motdFile struct {
 	original string
 }
 
-func startSecurityWarning(ctx context.Context) func() {
-	if ctx.Err() != nil {
-		return func() {}
-	}
+// Linux no longer installs login warnings. This cleanup remains so an agent
+// upgraded from an older release removes only Komari-managed MOTD content.
+func startSecurityWarning(context.Context) func() {
 	removeLegacyUpdateMOTDWarning(legacyUpdateMOTDPath)
-	if flags.DisableWebSsh {
-		if err := removeInstalledMOTDWarning(linuxMOTDPath); err != nil {
-			log.Printf("[warn] could not remove MOTD warning: %v", err)
-		}
-		return func() {}
+	if err := removeInstalledMOTDWarning(linuxMOTDPath); err != nil {
+		log.Printf("[warn] could not remove legacy MOTD warning: %v", err)
 	}
-	cleanup, err := installMOTDWarning(
-		linuxMOTDPath,
-		newSecurityWarning(flags.Endpoint, warningCurrentUser()),
-	)
-	if err != nil {
-		log.Printf("[warn] could not maintain MOTD warning: %v", err)
-		return func() {}
-	}
-	log.Printf("[warn] remote control is enabled; MOTD warning appended")
-	return cleanup
+	return func() {}
 }
 
 func removeInstalledMOTDWarning(path string) error {
@@ -63,11 +49,8 @@ func removeInstalledMOTDWarning(path string) error {
 		return nil
 	}
 	content, found, err := removeMOTDWarning(original.original)
-	if err != nil {
+	if err != nil || !found {
 		return err
-	}
-	if !found {
-		return nil
 	}
 	return writeMOTD(original, []byte(content))
 }
@@ -82,93 +65,11 @@ func removeLegacyUpdateMOTDWarning(path string) {
 		return
 	}
 	if !strings.HasPrefix(string(data), legacyUpdateMOTDMarker+"\n") {
-		log.Printf("[warn] legacy update-motd path is not managed by Komari; leaving it in place")
 		return
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		log.Printf("[warn] could not remove legacy update-motd hook: %v", err)
 	}
-}
-
-func installMOTDWarning(path string, warning securityWarning) (func(), error) {
-	original, err := readMOTD(path)
-	if err != nil {
-		return nil, err
-	}
-	base, found, err := removeMOTDWarning(original.original)
-	if err != nil {
-		return nil, err
-	}
-	managedOnly := found && base == ""
-	originalBase := base
-	separator := ""
-	updated := renderMOTDWarning(warning)
-	if base != "" {
-		separator = "\n\n"
-		if strings.HasSuffix(base, "\n\n") {
-			separator = ""
-		} else if strings.HasSuffix(base, "\n") {
-			separator = "\n"
-		}
-		updated = base + separator + updated
-	}
-	if err := writeMOTD(original, []byte(updated)); err != nil {
-		return nil, err
-	}
-	installedContent := updated
-
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			current, err := readMOTD(path)
-			if err != nil {
-				log.Printf("[warn] could not restore MOTD: %v", err)
-				return
-			}
-			if !current.exists {
-				return
-			}
-			if current.original == installedContent {
-				if !original.exists {
-					if err := os.Remove(current.target); err != nil && !os.IsNotExist(err) {
-						log.Printf("[warn] could not remove temporary MOTD: %v", err)
-					}
-					return
-				}
-				if err := writeMOTD(current, []byte(original.original)); err != nil {
-					log.Printf("[warn] could not restore MOTD: %v", err)
-				}
-				return
-			}
-			content, found, err := removeMOTDWarning(current.original)
-			if err != nil {
-				log.Printf("[warn] could not restore MOTD: %v", err)
-				return
-			}
-			if !found {
-				return
-			}
-			if original.exists && strings.HasPrefix(content, originalBase+separator) {
-				content = originalBase + strings.TrimPrefix(content, originalBase+separator)
-			}
-			if (!original.exists || managedOnly) && content == "" {
-				if err := os.Remove(current.target); err != nil && !os.IsNotExist(err) {
-					log.Printf("[warn] could not remove temporary MOTD: %v", err)
-				}
-				return
-			}
-			if err := writeMOTD(current, []byte(content)); err != nil {
-				log.Printf("[warn] could not restore MOTD: %v", err)
-			}
-		})
-	}, nil
-}
-
-func renderMOTDWarning(warning securityWarning) string {
-	return fmt.Sprintf("%s\n"+
-		"\x1b[33m%s\x1b[0m can \x1b[31mexecute commands\x1b[0m and read or \x1b[31mmodify files\x1b[0m on this device as \x1b[33m%s\x1b[0m.\n"+
-		"%s\n%s\n\nUninstall Komari Agent: %s\n",
-		motdWarningStart, warning.PanelHost, warning.RunAsUser, warningAdvice, warningCompromise, warningUninstallURL)
 }
 
 func removeMOTDWarning(content string) (string, bool, error) {
@@ -184,9 +85,7 @@ func removeMOTDWarning(content string) (string, bool, error) {
 		return "", false, fmt.Errorf("refusing to modify incomplete Komari warning in MOTD")
 	}
 	end := start + relativeEnd + len(motdWarningEnd)
-	before := content[:start]
-	after := strings.TrimPrefix(content[end:], "\n")
-	return before + after, true, nil
+	return content[:start] + strings.TrimPrefix(content[end:], "\n"), true, nil
 }
 
 func readMOTD(path string) (motdFile, error) {
