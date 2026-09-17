@@ -57,8 +57,18 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Snapshot version: ${VERSION}"
 
+  test:
+    needs: validate-ref
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+
   build-and-attach-binaries:
-    needs: prepare
+    needs: [prepare, test]
     runs-on: ubuntu-latest
 
     strategy:
